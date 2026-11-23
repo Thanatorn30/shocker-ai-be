@@ -19,4 +19,14 @@ export const env = {
     channelSecret: () => required("LINE_CHANNEL_SECRET"),
     channelAccessToken: () => required("LINE_CHANNEL_ACCESS_TOKEN"),
   },
+  // ส่งรูปใบเสร็จมา → บอทตอบสรุปกลับทาง LINE อัตโนมัติ (ปิดด้วย RECEIPT_AUTO_REPLY=false)
+  receiptAutoReply: process.env.RECEIPT_AUTO_REPLY?.trim().toLowerCase() !== "false",
+  gemini: {
+    apiKey: () => required("GEMINI_API_KEY"),
+    // ลองตามลำดับ — ตัวแรกล่ม/คนใช้เยอะ (503/429) จะใช้ตัวถัดไป; ตั้งเองได้ เช่น GEMINI_MODELS=gemini-3.8-flash,gemini-3.6-flash
+    models: (process.env.GEMINI_MODELS ?? "gemini-3.8-flash,gemini-3.6-flash,gemini-3.5-flash")
+      .split(",")
+      .map((m) => m.trim())
+      .filter(Boolean),
+  },
 };

@@ -49,6 +49,13 @@ enum SendStatus {
   failed
 }
 
+enum ReceiptStatus {
+  processing // กำลังให้ AI อ่าน
+  done // อ่านเป็นใบเสร็จสำเร็จ
+  not_receipt // AI อ่านแล้ว แต่รูปไม่ใช่ใบเสร็จ
+  failed // ดึงรูป/เรียก AI ไม่สำเร็จ — ดู error
+}
+
 // ───────────────────────── tables ─────────────────────────
 
 /// แอดมินที่ใช้ web chat
@@ -68,15 +75,15 @@ model Admin {
 
 // เก็บลูกค้าจากไลน์
 model Contact {
-  id            String    @id @default(uuid()) @db.Uuid
-  lineUserId    String    @unique @map("line_user_id") @db.VarChar(64) // source.userId จาก webhook
-  displayName   String?   @map("display_name") @db.VarChar(255)
-  pictureUrl    String?   @map("picture_url")
-  isFollowing   Boolean   @default(true) @map("is_following") // false = บล็อก OA → push ไม่ได้
-  followedAt    DateTime? @map("followed_at") @db.Timestamptz
-  unfollowedAt  DateTime? @map("unfollowed_at") @db.Timestamptz
-  createdAt     DateTime  @default(now()) @map("created_at") @db.Timestamptz
-  updatedAt     DateTime  @updatedAt @map("updated_at") @db.Timestamptz
+  id           String    @id @default(uuid()) @db.Uuid
+  lineUserId   String    @unique @map("line_user_id") @db.VarChar(64) // source.userId จาก webhook
+  displayName  String?   @map("display_name") @db.VarChar(255)
+  pictureUrl   String?   @map("picture_url")
+  isFollowing  Boolean   @default(true) @map("is_following") // false = บล็อก OA → push ไม่ได้
+  followedAt   DateTime? @map("followed_at") @db.Timestamptz
+  unfollowedAt DateTime? @map("unfollowed_at") @db.Timestamptz
+  createdAt    DateTime  @default(now()) @map("created_at") @db.Timestamptz
+  updatedAt    DateTime  @updatedAt @map("updated_at") @db.Timestamptz
 
   conversation Conversation?
 
@@ -129,15 +136,43 @@ model Message {
   isUnsent  Boolean  @default(false) @map("is_unsent") // ลูกค้ากดยกเลิกข้อความ
   createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz
 
-  conversation Conversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
-  senderAdmin  Admin?       @relation(fields: [senderAdminId], references: [id], onDelete: SetNull)
+  conversation      Conversation       @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+  senderAdmin       Admin?             @relation(fields: [senderAdminId], references: [id], onDelete: SetNull)
+  receiptExtraction ReceiptExtraction?
 
   @@index([conversationId, createdAt(sort: Desc)])
   @@index([lineMessageId])
   @@map("messages")
 }
 
-// log webhook ไว้ debug 
+/// ผลที่ AI อ่านใบเสร็จจากรูปที่ลูกค้าส่งมาทาง LINE — ไม่เก็บตัวรูป (ดึงจาก LINE มาอ่านในหน่วยความจำแล้วทิ้ง)
+model ReceiptExtraction {
+  id        String        @id @default(uuid()) @db.Uuid
+  messageId String        @unique @map("message_id") @db.Uuid // 1 รูป = 1 ผลอ่าน
+  status    ReceiptStatus @default(processing)
+  model     String?       @db.VarChar(100) // โมเดล AI ที่ใช้อ่าน
+  data      Json? // JSON เต็มที่ AI ถอดได้ (รายการสินค้า, VAT ฯลฯ)
+
+  // ช่องหลักแยกออกมา — ใช้ค้นหา/ส่งเข้า Google Sheet
+  merchantName String?   @map("merchant_name") @db.VarChar(255)
+  receiptNo    String?   @map("receipt_no") @db.VarChar(100)
+  receiptDate  DateTime? @map("receipt_date") @db.Date // ปี ค.ศ. (แปลงจาก พ.ศ. แล้ว)
+  totalAmount  Decimal?  @map("total_amount") @db.Decimal(12, 2)
+  currency     String?   @db.VarChar(3)
+
+  error         String?
+  attempts      Int       @default(0)
+  sheetSyncedAt DateTime? @map("sheet_synced_at") @db.Timestamptz // ส่งเข้า Google Sheet แล้วเมื่อไร (ขั้นถัดไป)
+  createdAt     DateTime  @default(now()) @map("created_at") @db.Timestamptz
+  updatedAt     DateTime  @updatedAt @map("updated_at") @db.Timestamptz
+
+  message Message @relation(fields: [messageId], references: [id], onDelete: Cascade)
+
+  @@index([status])
+  @@map("receipt_extractions")
+}
+
+// log webhook ไว้ debug
 model WebhookEvent {
   webhookEventId String    @id @map("webhook_event_id") @db.VarChar(64)
   eventType      String    @map("event_type") @db.VarChar(50)

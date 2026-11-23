@@ -41,6 +41,40 @@ export async function getMessageContent(messageId: string) {
   };
 }
 
+/**
+ * POST /v2/bot/message/reply — ตอบกลับด้วย replyToken (ฟรี ไม่นับโควตา push)
+ * token ใช้ได้ครั้งเดียวและหมดอายุเร็ว → พังให้ fallback ไป push
+ */
+export async function replyMessage(replyToken: string, messages: unknown[]): Promise<PushResult> {
+  const res = await fetch(`${API}/v2/bot/message/reply`, {
+    method: "POST",
+    headers: { ...authHeaders(), "Content-Type": "application/json" },
+    body: JSON.stringify({ replyToken, messages }),
+  });
+  if (res.ok) {
+    const data = (await res.json()) as { sentMessages?: { id: string }[] };
+    return { ok: true, sentMessageIds: data.sentMessages?.map((m) => m.id) ?? [] };
+  }
+  return { ok: false, status: res.status, retryable: false, error: await res.text() };
+}
+
+/**
+ * POST /v2/bot/chat/loading/start — แสดง ... กำลังพิมพ์ ในแชต 1:1 (5-60 วิ ทีละ 5) หายเองเมื่อบอทส่งข้อความ
+ * ไม่สำคัญ → พังแค่ log
+ */
+export async function startLoading(chatId: string, loadingSeconds = 60): Promise<void> {
+  try {
+    const res = await fetch(`${API}/v2/bot/chat/loading/start`, {
+      method: "POST",
+      headers: { ...authHeaders(), "Content-Type": "application/json" },
+      body: JSON.stringify({ chatId, loadingSeconds }),
+    });
+    if (!res.ok) console.warn("[line] loading animation failed", res.status, await res.text());
+  } catch (err) {
+    console.warn("[line] loading animation failed", err);
+  }
+}
+
 export type PushResult =
   | { ok: true; sentMessageIds: string[] }
   | { ok: false; status: number; retryable: boolean; error: string };

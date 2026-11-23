@@ -4,6 +4,7 @@ import { prisma } from "../lib/prisma.js";
 import { verifySignature, getProfile } from "../lib/line.js";
 import { pushRecentEvent } from "../lib/recentEvents.js";
 import { messagePreview } from "../lib/messagePreview.js";
+import { handleReceiptImage, type ReceiptJob } from "../lib/receiptReply.js";
 import { conversationInclude, messageInclude } from "../lib/includes.js";
 import {
   emitContactUpdated,
@@ -102,8 +103,11 @@ async function syncProfile(lineUserId: string): Promise<void> {
 
 // ───────────────────────── handlers ต่อชนิด event ─────────────────────────
 
-/** ผลของ handler: lineUserId ที่ควรดึงโปรไฟล์หลังตอบ 200 */
-type HandleResult = { syncProfileOf?: string };
+/** ผลของ handler: งานที่ต้องทำต่อหลังตอบ 200 */
+type HandleResult = {
+  syncProfileOf?: string; // lineUserId ที่ควรดึงโปรไฟล์
+  readReceipt?: ReceiptJob; // รูปที่ต้องให้ AI อ่านใบเสร็จแล้วตอบกลับ
+};
 
 async function handleMessage(event: LineMessageEvent): Promise<HandleResult> {
   const userId = event.source.userId;
@@ -176,7 +180,22 @@ async function handleMessage(event: LineMessageEvent): Promise<HandleResult> {
   emitConversationUpdated(result.conversation);
 
   // TODO: ไฟล์แนบ (media_status = pending) → getMessageContent แล้วเก็บลง storage
-  return { syncProfileOf: result.conversation.contact.displayName ? undefined : userId };
+  const syncProfileOf = result.conversation.contact.displayName ? undefined : userId;
+
+  // รูปที่อยู่บน LINE → ให้ AI อ่านใบเสร็จ (หลังตอบ 200) — "external" ดึงผ่าน getMessageContent ไม่ได้
+  if (event.message.type === "image" && event.message.contentProvider?.type !== "external") {
+    return {
+      syncProfileOf,
+      readReceipt: {
+        messageId: result.message.id,
+        lineMessageId: event.message.id,
+        lineUserId: userId,
+        replyToken: event.replyToken,
+        sentAt: event.timestamp,
+      },
+    };
+  }
+  return { syncProfileOf };
 }
 
 async function handleFollow(event: LineEvent): Promise<HandleResult> {
@@ -265,6 +284,7 @@ export async function lineWebhook(req: Request, res: Response) {
   }
 
   const profilesToSync = new Set<string>();
+  const receiptsToRead: ReceiptJob[] = [];
 
   // ทีละ event — event หนึ่งพังไม่ทำให้ event อื่นพังตาม
   for (const event of body.events ?? []) {
@@ -281,6 +301,7 @@ export async function lineWebhook(req: Request, res: Response) {
     try {
       const result = await handleEvent(event);
       if (result.syncProfileOf) profilesToSync.add(result.syncProfileOf);
+      if (result.readReceipt) receiptsToRead.push(result.readReceipt);
       await markProcessed(event.webhookEventId);
     } catch (err) {
       console.error("[line webhook] handle event failed", event.webhookEventId, err);
@@ -290,6 +311,7 @@ export async function lineWebhook(req: Request, res: Response) {
 
   res.sendStatus(200);
 
-  // งานที่เรียก LINE API ทำหลังตอบ 200
+  // งานที่เรียก LINE API / AI ทำหลังตอบ 200 (LINE ต้องการคำตอบเร็ว)
   for (const userId of profilesToSync) void syncProfile(userId);
+  for (const job of receiptsToRead) void handleReceiptImage(job);
 }

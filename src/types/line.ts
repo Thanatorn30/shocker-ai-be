@@ -20,6 +20,8 @@ export interface LineMessageEvent extends LineEventBase {
     id: string;
     type: "text" | "image" | "video" | "audio" | "file" | "sticker" | "location";
     text?: string;
+    /** มีใน image/video/audio — "line" = ไฟล์อยู่บน LINE (ดึงผ่าน getMessageContent) */
+    contentProvider?: { type: "line" | "external"; originalContentUrl?: string };
     [key: string]: unknown;
   };
 }
