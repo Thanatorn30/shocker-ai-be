@@ -2,6 +2,7 @@ import { JWT } from "google-auth-library";
 import { prisma } from "./prisma.js";
 import { env, sheetsEnabled } from "../config/env.js";
 import type { ReceiptData } from "./receipt.js";
+import { receiptImageUrl } from "./storage.js";
 
 // ผลอ่านใบเสร็จ (receipt_extractions.status = done) → ต่อแถวใน Google Sheet
 // ใช้ Service Account: แชร์ชีตให้อีเมล GOOGLE_SA_EMAIL เป็น Editor ก่อน
@@ -22,8 +23,9 @@ export const SHEET_HEADER = [
   "วิธีชำระ",
   "รายการ",
   "หมายเหตุ",
+  "รูปบิล",
 ];
-const LAST_COL = String.fromCharCode("A".charCodeAt(0) + SHEET_HEADER.length - 1); // N
+const LAST_COL = String.fromCharCode("A".charCodeAt(0) + SHEET_HEADER.length - 1); // O
 
 const API = "https://sheets.googleapis.com/v4/spreadsheets";
 const RETRY_INTERVAL_MS = 5 * 60_000;
@@ -52,11 +54,12 @@ function url(path: string): string {
   return `${API}/${env.sheets.sheetId}/values/${encodeURIComponent(path)}`;
 }
 
-/** ถ้าแถว 1 ยังว่าง → ใส่หัวคอลัมน์ให้ (เช็คครั้งเดียวต่อการรัน server) */
+/** แถว 1 ว่าง/หัวคอลัมน์ไม่ครบ (เช่น เพิ่งเพิ่มคอลัมน์ใหม่) → เขียนหัวคอลัมน์ทั้งแถว (เช็คครั้งเดียวต่อการรัน server) */
 async function ensureHeader(): Promise<void> {
   if (headerChecked) return;
   const res = await auth().request<{ values?: string[][] }>({ url: url(range(`A1:${LAST_COL}1`)) });
-  if (!res.data.values?.[0]?.some((v) => v?.trim())) {
+  const current = res.data.values?.[0] ?? [];
+  if (SHEET_HEADER.some((h, i) => !current[i]?.trim())) {
     await auth().request({
       url: `${url(range("A1"))}?valueInputOption=RAW`,
       method: "PUT",
@@ -66,14 +69,36 @@ async function ensureHeader(): Promise<void> {
   headerChecked = true;
 }
 
-/** ต่อแถวท้ายตาราง — RAW: ข้อความจากรูปที่ขึ้นต้นด้วย = จะไม่กลายเป็นสูตร */
-export async function appendRows(rows: (string | number | null)[][]): Promise<void> {
+/** สูตรที่เราสร้างเอง (เช่น ลิงก์รูป) — ค่าอื่นทุกช่องจะถูกเขียนเป็นข้อความ/ตัวเลขตรงตัว */
+export class Formula {
+  constructor(readonly value: string) {}
+}
+type Cell = string | number | null | Formula;
+
+/**
+ * USER_ENTERED เพื่อให้สูตรลิงก์รูปทำงาน — ข้อความทุกช่องใส่ ' นำหน้า (ไม่แสดงในชีต)
+ * กันข้อความจากรูปที่ขึ้นต้นด้วย = กลายเป็นสูตร, เลขที่ "00012" ไม่หายศูนย์, วันที่ยังเป็นข้อความเหมือนเดิม
+ */
+function toCell(v: Cell): string | number | null {
+  if (v instanceof Formula) return v.value;
+  if (typeof v === "string") return `'${v}`;
+  return v;
+}
+
+/** ต่อแถวท้ายตาราง */
+export async function appendRows(rows: Cell[][]): Promise<void> {
   await ensureHeader();
   await auth().request({
-    url: `${url(range(`A:${LAST_COL}`))}:append?valueInputOption=RAW&insertDataOption=INSERT_ROWS`,
+    url: `${url(range(`A:${LAST_COL}`))}:append?valueInputOption=USER_ENTERED&insertDataOption=INSERT_ROWS`,
     method: "POST",
-    data: { values: rows },
+    data: { values: rows.map((row) => row.map(toCell)) },
   });
+}
+
+/** =HYPERLINK("url","ดูรูป") */
+function imageLink(messageId: string, imageKey: string | null): Formula | null {
+  const link = imageKey ? receiptImageUrl(messageId) : null;
+  return link ? new Formula(`=HYPERLINK("${link.replace(/"/g, '""')}","ดูรูป")`) : null;
 }
 
 /** เวลาไทย "2026-11-24 14:35" */
@@ -83,7 +108,13 @@ function bangkokTime(date: Date): string {
 
 const n = (v: unknown) => (typeof v === "number" && Number.isFinite(v) ? v : null);
 
-export function receiptRow(messageId: string, receivedAt: Date, customer: string | null, d: ReceiptData) {
+export function receiptRow(
+  messageId: string,
+  receivedAt: Date,
+  customer: string | null,
+  d: ReceiptData,
+  imageKey: string | null = null,
+): Cell[] {
   const items = d.items
     .map((item, i) => {
       let line = `${i + 1}. ${item.name}`;
@@ -108,6 +139,7 @@ export function receiptRow(messageId: string, receivedAt: Date, customer: string
     d.payment_method ?? null,
     items || null,
     d.notes ?? null,
+    imageLink(messageId, imageKey),
   ];
 }
 
@@ -129,6 +161,7 @@ export async function syncReceiptsToSheet(messageIds: string[]): Promise<number>
       select: {
         messageId: true,
         data: true,
+        imageKey: true,
         message: {
           select: {
             createdAt: true,
@@ -149,6 +182,7 @@ export async function syncReceiptsToSheet(messageIds: string[]): Promise<number>
           r.message.createdAt,
           r.message.conversation.contact.displayName,
           r.data as unknown as ReceiptData,
+          r.imageKey,
         );
       }),
     );

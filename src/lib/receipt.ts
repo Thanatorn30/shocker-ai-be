@@ -5,6 +5,7 @@ import { gemini } from "./gemini.js";
 import { getMessageContent } from "./line.js";
 import { env } from "../config/env.js";
 import { syncReceiptToSheet } from "./sheets.js";
+import { uploadReceiptImage } from "./storage.js";
 
 // อ่านใบเสร็จจากรูปที่ลูกค้าส่งมาทาง LINE ด้วย Gemini → JSON → receipt_extractions
 // ไม่เก็บตัวรูป: ดึงจาก LINE มาเป็น Buffer ในหน่วยความจำ ส่งให้ AI แล้วทิ้ง
@@ -25,6 +26,8 @@ export interface ReceiptData {
   merchant_branch?: string;
   merchant_tax_id?: string;
   merchant_address?: string;
+  buyer_name?: string;
+  buyer_tax_id?: string;
   receipt_no?: string;
   date?: string; // YYYY-MM-DD ปี ค.ศ.
   time?: string; // HH:MM
@@ -55,6 +58,8 @@ const RECEIPT_SCHEMA = {
     merchant_branch: { ...str, description: "สาขา เช่น สำนักงานใหญ่ หรือ สาขาที่ 00012" },
     merchant_tax_id: { ...str, description: "เลขประจำตัวผู้เสียภาษี 13 หลัก ตัวเลขล้วน" },
     merchant_address: str,
+    buyer_name: { ...str, description: "ชื่อลูกค้า/ผู้ซื้อ/ผู้รับของ ที่ระบุในเอกสาร (ถ้ามี)" },
+    buyer_tax_id: { ...str, description: "เลขประจำตัวผู้เสียภาษีของผู้ซื้อ 13 หลัก ตัวเลขล้วน (ถ้ามี)" },
     receipt_no: { ...str, description: "เลขที่ใบเสร็จ/เลขที่เอกสาร" },
     date: { ...str, description: "วันที่ในเอกสาร รูปแบบ YYYY-MM-DD ปี ค.ศ. (ถ้าเป็น พ.ศ. ให้ลบ 543)" },
     time: { ...str, description: "เวลา HH:MM แบบ 24 ชม." },
@@ -82,35 +87,43 @@ const PROMPT = `อ่านรูปนี้แล้วถอดข้อม�
 - ถ้าไม่ใช่ใบเสร็จ/บิล ให้ is_receipt = false และ items = []
 - ตัวเลขเงินเป็น number ไม่มีคอมมาหรือสัญลักษณ์สกุลเงิน
 - ห้ามเดา: ช่องที่ไม่มีในรูปหรืออ่านไม่ออกให้ละไว้ แล้วระบุใน notes
-- วันที่ในใบเสร็จไทยมักเป็น พ.ศ. ให้แปลงเป็น ค.ศ.`;
+- วันที่ในใบเสร็จไทยมักเป็น พ.ศ. ให้แปลงเป็น ค.ศ.
+- notes เขียนเป็นภาษาไทยสั้นๆ`;
+
+const MULTI_PAGE_NOTE = `\n- รูปทั้งหมดที่ส่งมาเป็นเอกสารฉบับเดียวกัน (หลายหน้า/หลายมุม) ให้รวมเป็น JSON เดียว: รายการสินค้าเรียงตามลำดับรูป ไม่นับรายการซ้ำที่เห็นในหลายรูป`;
+
+export type ImageInput = { data: Buffer; mimeType: string };
 
 // ───────────────────────── helpers ─────────────────────────
 
 /** YYYY-MM-DD → Date (ถ้ารูปแบบผิด/ยังเป็น พ.ศ. → null) */
-function toDate(value: string | undefined): Date | null {
+export function toDate(value: string | undefined): Date | null {
   if (!value || !/^\d{4}-\d{2}-\d{2}$/.test(value)) return null;
   const date = new Date(`${value}T00:00:00Z`);
   const year = date.getUTCFullYear();
   return Number.isNaN(date.getTime()) || year < 2000 || year > 2100 ? null : date;
 }
 
-function toDecimal(value: unknown): Prisma.Decimal | null {
+export function toDecimal(value: unknown): Prisma.Decimal | null {
   return typeof value === "number" && Number.isFinite(value) ? new Prisma.Decimal(value.toFixed(2)) : null;
 }
 
-function clip(value: string | undefined, max: number): string | null {
+export function clip(value: string | undefined, max: number): string | null {
   const v = value?.trim();
   return v ? v.slice(0, max) : null;
 }
 
-/** ส่งรูปให้โมเดลเดียวอ่าน → ReceiptData */
-async function readWithModel(model: string, image: Buffer, mimeType: string): Promise<ReceiptData> {
+/** ส่งรูป (1 รูปขึ้นไป = เอกสารฉบับเดียว) ให้โมเดลเดียวอ่าน → ReceiptData */
+async function readWithModel(model: string, images: ImageInput[]): Promise<ReceiptData> {
   const response = await gemini().models.generateContent({
     model,
     contents: [
       {
         role: "user",
-        parts: [{ inlineData: { mimeType, data: image.toString("base64") } }, { text: PROMPT }],
+        parts: [
+          ...images.map((img) => ({ inlineData: { mimeType: img.mimeType, data: img.data.toString("base64") } })),
+          { text: images.length > 1 ? PROMPT + MULTI_PAGE_NOTE : PROMPT },
+        ],
       },
     ],
     config: {
@@ -145,10 +158,16 @@ export async function readReceiptImage(
   image: Buffer,
   mimeType: string,
 ): Promise<{ data: ReceiptData; model: string }> {
+  return readReceiptImages([{ data: image, mimeType }]);
+}
+
+/** หลายรูปของบิลใบเดียว (เช่น 3 หน้า) → อ่านในครั้งเดียว */
+export async function readReceiptImages(images: ImageInput[]): Promise<{ data: ReceiptData; model: string }> {
+  if (images.length === 0) throw new Error("no images to read");
   let lastError: unknown = new Error("no GEMINI_MODELS configured");
   for (const model of env.gemini.models) {
     try {
-      return { data: await readWithModel(model, image, mimeType), model };
+      return { data: await readWithModel(model, images), model };
     } catch (err) {
       lastError = err;
       if (!shouldTryNextModel(err)) break;
@@ -192,9 +211,20 @@ export async function extractReceipt(
     return null;
   }
 
+  // เก็บรูปเข้า R2 ไปพร้อมกับให้ AI อ่าน — พัง/ปิดอยู่ไม่กระทบการอ่านบิล
+  let upload: Promise<string | null> | undefined;
+  const saveImageKey = async () => {
+    const imageKey = upload ? await upload : null;
+    if (!imageKey) return;
+    await db.receiptExtraction
+      .update({ where: { messageId }, data: { imageKey } })
+      .catch((e) => console.error("[receipt] save image key failed", messageId, e instanceof Error ? e.message : e));
+  };
+
   try {
     const { contentType, body } = await getMessageContent(lineMessageId);
     if (!contentType.startsWith("image/")) throw new Error(`not an image: ${contentType}`);
+    upload = uploadReceiptImage(messageId, body);
 
     const { data, model } = await readReceiptImage(body, contentType);
 
@@ -213,6 +243,7 @@ export async function extractReceipt(
       },
     });
     console.log("[receipt]", data.is_receipt ? "done" : "not_receipt", messageId);
+    await saveImageKey(); // ก่อนเขียนชีต เพื่อให้แถวมีลิงก์รูป
     // ส่งเข้า Google Sheet แบบไม่รอ (ไม่ให้ช้า/พังแล้วกระทบการตอบลูกค้า) — พลาดจะมีรอบส่งซ้ำใน sheets.ts
     // รูปที่มาเป็นชุด (imageSet) → ผู้เรียกจะเขียนชีตทีเดียวหลังอ่านครบ (syncSheet: false)
     if (data.is_receipt && options.syncSheet !== false) void syncReceiptToSheet(messageId);
@@ -223,6 +254,7 @@ export async function extractReceipt(
     await db.receiptExtraction
       .update({ where: { messageId }, data: { status: "failed", error: message.slice(0, 2000) } })
       .catch((e) => console.error("[receipt] mark failed error", e));
+    await saveImageKey(); // อ่านไม่สำเร็จก็ยังเก็บรูปไว้ให้แอดมินดู
     return { status: "failed", error: message };
   }
 }

@@ -13,6 +13,8 @@ const app = express();
 app.use("/api/line/webhook", webhookRouter);
 
 app.use(cors({ origin: env.corsOrigin }));
+// อ่านรูปบิลก่อนบันทึก: รูป base64 สูงสุด 3 รูป (FE ย่อแล้ว) — ต้องมาก่อน express.json() ตัวกลาง (limit 100kb)
+app.use("/api/bills/read", express.json({ limit: "25mb" }));
 app.use(express.json());
 
 app.get("/health", (_req, res) => {
