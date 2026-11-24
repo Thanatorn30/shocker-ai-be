@@ -192,6 +192,7 @@ async function handleMessage(event: LineMessageEvent): Promise<HandleResult> {
         lineUserId: userId,
         replyToken: event.replyToken,
         sentAt: event.timestamp,
+        imageSet: event.message.imageSet,
       },
     };
   }

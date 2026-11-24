@@ -22,6 +22,8 @@ export interface LineMessageEvent extends LineEventBase {
     text?: string;
     /** มีใน image/video/audio — "line" = ไฟล์อยู่บน LINE (ดึงผ่าน getMessageContent) */
     contentProvider?: { type: "line" | "external"; originalContentUrl?: string };
+    /** มีเมื่อลูกค้าเลือกหลายรูปแล้วส่งพร้อมกัน — รูปในชุดเดียวกันมี id เดียวกัน (index เริ่ม 1) */
+    imageSet?: { id: string; index: number; total: number };
     [key: string]: unknown;
   };
 }

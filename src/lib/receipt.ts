@@ -168,7 +168,11 @@ export type ReceiptOutcome =
  * อ่านใบเสร็จจากรูปของข้อความ (messages.id) แล้วบันทึกลง receipt_extractions
  * ไม่ throw (ผิดพลาด = status failed + error) — คืน null = เคยอ่านแล้ว/กำลังอ่าน/เริ่มไม่ได้ (ไม่ต้องตอบลูกค้าซ้ำ)
  */
-export async function extractReceipt(messageId: string, lineMessageId: string): Promise<ReceiptOutcome | null> {
+export async function extractReceipt(
+  messageId: string,
+  lineMessageId: string,
+  options: { syncSheet?: boolean } = {},
+): Promise<ReceiptOutcome | null> {
   const db = prisma();
 
   try {
@@ -210,7 +214,8 @@ export async function extractReceipt(messageId: string, lineMessageId: string): 
     });
     console.log("[receipt]", data.is_receipt ? "done" : "not_receipt", messageId);
     // ส่งเข้า Google Sheet แบบไม่รอ (ไม่ให้ช้า/พังแล้วกระทบการตอบลูกค้า) — พลาดจะมีรอบส่งซ้ำใน sheets.ts
-    if (data.is_receipt) void syncReceiptToSheet(messageId);
+    // รูปที่มาเป็นชุด (imageSet) → ผู้เรียกจะเขียนชีตทีเดียวหลังอ่านครบ (syncSheet: false)
+    if (data.is_receipt && options.syncSheet !== false) void syncReceiptToSheet(messageId);
     return { status: data.is_receipt ? "done" : "not_receipt", data };
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);

@@ -27,7 +27,7 @@ const LAST_COL = String.fromCharCode("A".charCodeAt(0) + SHEET_HEADER.length - 1
 
 const API = "https://sheets.googleapis.com/v4/spreadsheets";
 const RETRY_INTERVAL_MS = 5 * 60_000;
-const RETRY_MIN_AGE_MS = 2 * 60_000; // ให้ตัวที่เพิ่งอ่านเสร็จส่งเองก่อน กันส่งซ้ำ
+const RETRY_MIN_AGE_MS = 5 * 60_000; // ให้ตัวที่เพิ่งอ่านเสร็จ (รวมชุดหลายรูป) ส่งเองก่อน กันส่งซ้ำ
 
 let client: JWT | undefined;
 let headerChecked = false;
@@ -113,15 +113,22 @@ export function receiptRow(messageId: string, receivedAt: Date, customer: string
 
 /** ส่งผลอ่านใบเสร็จ 1 รายการเข้าชีต แล้วตั้ง sheet_synced_at — ไม่ throw */
 export async function syncReceiptToSheet(messageId: string): Promise<boolean> {
-  if (!sheetsEnabled()) return false;
+  return (await syncReceiptsToSheet([messageId])) > 0;
+}
+
+/**
+ * ส่งผลอ่านหลายใบเข้าชีตใน append ครั้งเดียว (เรียงตามลำดับ messageIds) แล้วตั้ง sheet_synced_at
+ * ข้ามตัวที่ไม่ใช่ done/ส่งไปแล้ว — คืนจำนวนแถวที่เขียน, ไม่ throw
+ */
+export async function syncReceiptsToSheet(messageIds: string[]): Promise<number> {
+  if (!sheetsEnabled() || messageIds.length === 0) return 0;
   const db = prisma();
   try {
-    const row = await db.receiptExtraction.findUnique({
-      where: { messageId },
+    const found = await db.receiptExtraction.findMany({
+      where: { messageId: { in: messageIds }, status: "done", sheetSyncedAt: null },
       select: {
-        status: true,
+        messageId: true,
         data: true,
-        sheetSyncedAt: true,
         message: {
           select: {
             createdAt: true,
@@ -130,22 +137,30 @@ export async function syncReceiptToSheet(messageId: string): Promise<boolean> {
         },
       },
     });
-    if (!row || row.status !== "done" || row.sheetSyncedAt || !row.data) return false;
+    const byId = new Map(found.filter((r) => r.data).map((r) => [r.messageId, r]));
+    const ids = messageIds.filter((id) => byId.has(id));
+    if (ids.length === 0) return 0;
 
-    await appendRows([
-      receiptRow(
-        messageId,
-        row.message.createdAt,
-        row.message.conversation.contact.displayName,
-        row.data as unknown as ReceiptData,
-      ),
-    ]);
-    await db.receiptExtraction.update({ where: { messageId }, data: { sheetSyncedAt: new Date() } });
-    console.log("[sheets] synced", messageId);
-    return true;
+    await appendRows(
+      ids.map((id) => {
+        const r = byId.get(id)!;
+        return receiptRow(
+          id,
+          r.message.createdAt,
+          r.message.conversation.contact.displayName,
+          r.data as unknown as ReceiptData,
+        );
+      }),
+    );
+    await db.receiptExtraction.updateMany({
+      where: { messageId: { in: ids } },
+      data: { sheetSyncedAt: new Date() },
+    });
+    console.log("[sheets] synced", ids.length, "row(s)", ids.join(","));
+    return ids.length;
   } catch (err) {
-    console.error("[sheets] sync failed", messageId, err instanceof Error ? err.message : err);
-    return false;
+    console.error("[sheets] sync failed", messageIds.join(","), err instanceof Error ? err.message : err);
+    return 0;
   }
 }
 
@@ -159,7 +174,7 @@ export async function syncPendingReceipts(): Promise<void> {
       orderBy: { createdAt: "asc" },
       take: 20,
     });
-    for (const { messageId } of pending) await syncReceiptToSheet(messageId);
+    await syncReceiptsToSheet(pending.map((p) => p.messageId));
   } catch (err) {
     console.error("[sheets] pending sync failed", err instanceof Error ? err.message : err);
   }
