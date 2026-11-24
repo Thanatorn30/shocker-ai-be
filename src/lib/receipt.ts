@@ -4,6 +4,7 @@ import { prisma } from "./prisma.js";
 import { gemini } from "./gemini.js";
 import { getMessageContent } from "./line.js";
 import { env } from "../config/env.js";
+import { syncReceiptToSheet } from "./sheets.js";
 
 // อ่านใบเสร็จจากรูปที่ลูกค้าส่งมาทาง LINE ด้วย Gemini → JSON → receipt_extractions
 // ไม่เก็บตัวรูป: ดึงจาก LINE มาเป็น Buffer ในหน่วยความจำ ส่งให้ AI แล้วทิ้ง
@@ -208,6 +209,8 @@ export async function extractReceipt(messageId: string, lineMessageId: string): 
       },
     });
     console.log("[receipt]", data.is_receipt ? "done" : "not_receipt", messageId);
+    // ส่งเข้า Google Sheet แบบไม่รอ (ไม่ให้ช้า/พังแล้วกระทบการตอบลูกค้า) — พลาดจะมีรอบส่งซ้ำใน sheets.ts
+    if (data.is_receipt) void syncReceiptToSheet(messageId);
     return { status: data.is_receipt ? "done" : "not_receipt", data };
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);

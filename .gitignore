@@ -3,3 +3,6 @@ dist
 .env
 .DS_Store
 docs
+
+# Google service account key (ห้าม commit)
+shocker-ai-*.json

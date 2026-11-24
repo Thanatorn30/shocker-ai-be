@@ -29,4 +29,14 @@ export const env = {
       .map((m) => m.trim())
       .filter(Boolean),
   },
+  // ผลอ่านใบเสร็จ → Google Sheet (Service Account) — ไม่ได้ตั้ง env ครบ = ปิดฟีเจอร์นี้ ไม่ทำให้ server ล่ม
+  sheets: {
+    email: process.env.GOOGLE_SA_EMAIL?.trim() ?? "",
+    // ใน .env/Render key มักมาเป็น \n แบบตัวอักษร → แปลงเป็นขึ้นบรรทัดจริง
+    privateKey: (process.env.GOOGLE_SA_PRIVATE_KEY ?? "").trim().replace(/^"|"$/g, "").replace(/\\n/g, "\n"),
+    sheetId: process.env.GOOGLE_SHEET_ID?.trim() ?? "",
+    tab: process.env.GOOGLE_SHEET_TAB?.trim() || "receipts",
+  },
 };
+
+export const sheetsEnabled = () => Boolean(env.sheets.email && env.sheets.privateKey && env.sheets.sheetId);

@@ -5,6 +5,7 @@ import { env } from "./config/env.js";
 import { webhookRouter } from "./routes/webhook.js";
 import { apiRouter } from "./routes/index.js";
 import { initRealtime } from "./lib/realtime.js";
+import { startSheetSync } from "./lib/sheets.js";
 
 const app = express();
 
@@ -26,4 +27,5 @@ initRealtime(server);
 
 server.listen(env.port, () => {
   console.log(`webchat-be listening on http://localhost:${env.port}`);
+  startSheetSync(); // ส่งผลอ่านใบเสร็จที่ค้างเข้า Google Sheet + วนเช็คทุก 5 นาที
 });
